@@ -17,6 +17,6 @@ The overview of PMR is shown in the picture.
 <img width="488" height="281" alt="image" src="https://github.com/user-attachments/assets/6533a64f-4b2a-4c6b-b2d1-979dac670b39" />
 
 # Maintainer
-Wentong Li [email](liwentongemail@gmail.com)
+Wentong Li [liwentongemail@gmail.com](liwentongemail@gmail.com)
 
 Tips: This repository code will be continuously updated once the code has passed necessary checks.

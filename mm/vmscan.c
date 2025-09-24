@@ -7106,7 +7106,11 @@ kswapd_try_sleep:
 		if (ret)
 			continue;
 #ifdef CONFIG_KSHRINKD
-		kshrink_ret = kshrinkd_page_list(victim_page_list);
+	  	if (!list_empty(&victim_page_list)) {
+		
+			kshrink_ret = kshrinkd_page_list(victim_page_list);
+		
+		}
 		if(kshrink_ret){
 			return 0;
 		}else{

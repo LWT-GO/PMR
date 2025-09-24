@@ -1,16 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- *  linux/mm/vmscan.c
- *
- *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
- *
- *  Swap reorganised 29.12.95, Stephen Tweedie.
- *  kshrinkd added: 7.1.96  sct
- *  Removed kshrinkd_ctl limits, and swap out as many pages as needed
- *  to bring the system back to freepages.high: 2.4.97, Rik van Riel.
- *  Zone aware kshrinkd started 02/00, Kanoj Sarcar (kanoj@sgi.com).
- *  Multiqueue VM started 5.8.00, Rik van Riel.
- */
+
 
  #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -70,26 +59,13 @@
  #include <linux/timex.h>
  #include <linux/rtc.h>
  
- #include "internal.h"
+ #include "internal.h" 
+
  
- 
- #define CREATE_TRACE_POINTS
- #include <trace/events/vmscan.h>
- 
- #undef CREATE_TRACE_POINTS
- #include <trace/hooks/vmscan.h>
- 
- #undef CREATE_TRACE_POINTS
- #include <trace/hooks/mm.h>
- 
- EXPORT_TRACEPOINT_SYMBOL_GPL(mm_vmscan_direct_reclaim_begin);
- EXPORT_TRACEPOINT_SYMBOL_GPL(mm_vmscan_direct_reclaim_end);
- 
- unsigned long kshrinkd_count=0;
  unsigned long direct_count=0;
  
  struct scan_control {
-     /* How many pages shrink_list() should reclaim */
+     /* How many pages kshrink_list() should reclaim */
      unsigned long nr_to_reclaim;
  
      /*
@@ -1607,7 +1583,7 @@
   *
   * returns how many pages were moved onto *@dst.
   */
- static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
+ static unsigned long kisolate_lru_pages(unsigned long nr_to_scan,
          struct lruvec *lruvec, struct list_head *dst,
          unsigned long *nr_scanned, struct scan_control *sc,
          enum lru_list lru)
@@ -1715,7 +1691,7 @@
   * Restrictions:
   *
   * (1) Must be called with an elevated refcount on the page. This is a
-  *     fundamental difference from isolate_lru_pages (which is called
+  *     fundamental difference from kisolate_lru_pages (which is called
   *     without a stable reference).
   * (2) the lru_lock must not be held.
   * (3) interrupts must be enabled.
@@ -1871,16 +1847,14 @@
  kshrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
               struct scan_control *sc, enum lru_list lru, unsigned long long *tar)
  {
-     LIST_HEAD(victim_page_list);
+     LIST_HEAD(page_list);
      unsigned long nr_scanned;
      unsigned long isolated;
      bool file = is_file_lru(lru);
      struct pglist_data *pgdat = lruvec_pgdat(lruvec);
      bool stalled = false;
-     struct pagevec pvec;
-
-    pagevec_init(&pvec);
-
+     struct page *page, *tmp;
+     
      while (unlikely(too_many_isolated(pgdat, file, sc))) {
          if (stalled)
              return 0;
@@ -1895,40 +1869,49 @@
      }
  
      lru_add_drain();
- 
+
      spin_lock_irq(&pgdat->lru_lock);
+    
+     nr_taken = kisolate_lru_pages(nr_to_scan, lruvec, &page_list,
+                  &nr_scanned, lru, sc);
+     
+    spin_unlock_irq(&pgdat->lru_lock);
+    
+    if (nr_taken == 0)
+         return 0;
  
+     /* 处理隔离的页面 */
+     list_for_each_entry_safe(page, tmp, &page_list, lru) {
+         /* 检查是否达到上限 */
+         if (atomic_read(&victim_page_count) >= VICTIM_LIST_MAX_PAGES)
+             break;
  
-     isolated = isolate_lru_pages(nr_to_scan, lruvec, &pvec,
-                      &nr_scanned, sc, lru);
+         list_del(&page->lru);
+         
+         /* 添加到受害者列表 */
+         spin_lock_irqsave(&victim_list_lock, flags);
+         list_add_tail(&page->lru, &victim_page_list);
+         SetPageVictim(page);
+         atomic_inc(&victim_page_count);
+         spin_unlock_irqrestore(&victim_list_lock, flags);
+     }
  
+     /* 将剩余页面放回 LRU */
+     if (!list_empty(&page_list)) {
+         spin_lock_irqsave(&lruvec->lru_lock, flags);
+         putback_lru_pages(&page_list);
+         spin_unlock_irqrestore(&lruvec->lru_lock, flags);
+     }
+
+     lru_add_drain();
+ 
+     
      __mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
  
-     spin_unlock_irq(&pgdat->lru_lock);
- 
-     if (isolated > 0) {
-        for (i = 0; i < isolated; i++) {
-            page = pvec.pages[i];
-            if (PageReferenced(page) || PageActive(page)) {
-                /* 如果页面最近被访问，将其放回LRU */
-                spin_lock_irq(&lruvec->lru_lock);
-                putback_lru_page(page);
-                spin_unlock_irq(&lruvec->lru_lock);
-            } else {
-                /* 否则，加入我们的victim列表 */
-                spin_lock(&victim_list_lock);
-                list_add_tail(&page->lru, &victim_page_list);
-                spin_unlock(&victim_list_lock);
-                nr_pages++;
-            }
-        }
-    }
-     
-    pagevec_release(&pvec);
     return nr_pages;
  }
  
- static void shrink_active_list(unsigned long nr_to_scan,
+ static void kshrink_active_list(unsigned long nr_to_scan,
                     struct lruvec *lruvec,
                     struct scan_control *sc,
                     enum lru_list lru)
@@ -1953,7 +1936,7 @@
  
      spin_lock_irq(&pgdat->lru_lock);
  
-     nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold,
+     nr_taken = kisolate_lru_pages(nr_to_scan, lruvec, &l_hold,
                       &nr_scanned, sc, lru);
  
      // isolate_time = ktime_get();
@@ -2033,10 +2016,6 @@
      trace_mm_vmscan_lru_shrink_active(pgdat->node_id, nr_taken, nr_activate,
              nr_deactivate, nr_rotated, sc->priority, file);
      
-     // shrinkactive_time = ktime_get();
-     // delta = ktime_sub(shrinkactive_time, starttime);
-     // duration = (unsigned long long) ktime_to_us(delta);//΢��
-     // printk("lwt:%s shrinkactive_time %lld usecs\n",__FUNCTION__, duration);
  }
  
  unsigned long reclaim_pages(struct list_head *page_list)
@@ -2101,7 +2080,7 @@
      return nr_reclaimed;
  }
  
- static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
+ static unsigned long kshrink_list(enum lru_list lru, unsigned long nr_to_scan,
                   struct lruvec *lruvec, struct scan_control *sc, unsigned long long *par)
  {
      unsigned int tmp;
@@ -2112,7 +2091,7 @@
      //printk("lwt:%s start!\n",__FUNCTION__);
      if (is_active_lru(lru)) {
          if (sc->may_deactivate & (1 << is_file_lru(lru)))
-             shrink_active_list(nr_to_scan, lruvec, sc, lru);
+             kshrink_active_list(nr_to_scan, lruvec, sc, lru);
          else
              sc->skipped_deactivate = 1;
          return 0;
@@ -2502,7 +2481,7 @@
  
    
 
-static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsigned long long *lwt2)
+static void kshrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsigned long long *lwt2)
  {
      // struct timeval tv_begin1;
      // struct timeval tv_begin2;
@@ -2524,7 +2503,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
      satrt_time = ktime_get();
  
      if (lru_gen_enabled()) {
-         lru_gen_shrink_lruvec(lruvec, sc);
+         lru_gen_kshrink_lruvec(lruvec, sc);
          return;
      }
  
@@ -2550,7 +2529,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
      proportional_reclaim = (!cgroup_reclaim(sc) && !current_is_kshrinkd() &&
                  sc->priority == DEF_PRIORITY);
  
-     trace_android_vh_shrink_lruvec_blk_plug(&do_plug);
+     trace_android_vh_kshrink_lruvec_blk_plug(&do_plug);
      if (do_plug)
          blk_start_plug(&plug);
      while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
@@ -2564,7 +2543,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
                  total_scan = total_scan + nr_to_scan;
                  nr[lru] -= nr_to_scan;
  
-                 nr_reclaimed += shrink_list(lru, nr_to_scan,
+                 nr_reclaimed += kshrink_list(lru, nr_to_scan,
                                  lruvec, sc, &every_time);
          
              }
@@ -2637,7 +2616,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
       * rebalance the anon lru active/inactive ratio.
       */
      if (total_swap_pages && inactive_is_low(lruvec, LRU_INACTIVE_ANON))
-         shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
+         kshrink_active_list(SWAP_CLUSTER_MAX, lruvec,
                     sc, LRU_ACTIVE_ANON);
  
  }
@@ -2762,7 +2741,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
          reclaimed = sc->nr_reclaimed;
          scanned = sc->nr_scanned;
  
-         shrink_lruvec(lruvec, sc, &mid_time);
+         kshrink_lruvec(lruvec, sc, &mid_time);
  
          shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
                  sc->priority);
@@ -2963,7 +2942,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
      memcg = mem_cgroup_iter(NULL, NULL, NULL);
      do {
          lruvec = mem_cgroup_lruvec(memcg, pgdat);
-         shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
+         kshrink_active_list(SWAP_CLUSTER_MAX, lruvec,
                     sc, LRU_ACTIVE_ANON);
          memcg = mem_cgroup_iter(NULL, memcg, NULL);
      } while (memcg);
@@ -3049,16 +3028,16 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
                  int highest_zoneidx)
  {
      /*
-      * The throttled processes are normally woken up in balance_pgdat() as
+      * The throttled processes are normally woken up in kbalance_pgdat() as
       * soon as allow_direct_reclaim() is true. But there is a potential
       * race between when kshrinkd checks the watermarks and a process gets
       * throttled. There is also a potential race if processes get
       * throttled, kshrinkd wakes, a large process exits thereby balancing the
-      * zones, which causes kshrinkd to exit balance_pgdat() before reaching
+      * zones, which causes kshrinkd to exit kbalance_pgdat() before reaching
       * the wake up checks. If kshrinkd is going to sleep, no process should
       * be sleeping on pfmemalloc_wait, so wake them now if necessary. If
       * the wake up is premature, processes will wake kshrinkd and get
-      * throttled again. The difference from wake ups in balance_pgdat() is
+      * throttled again. The difference from wake ups in kbalance_pgdat() is
       * that here we are under prepare_to_wait().
       */
      if (waitqueue_active(&pgdat->pfmemalloc_wait))
@@ -3130,7 +3109,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
  }
  
  /*
-  * For kshrinkd, balance_pgdat() will reclaim pages across a node from zones
+  * For kshrinkd, kbalance_pgdat() will reclaim pages across a node from zones
   * that are eligible for use by the caller until at least one zone is
   * balanced.
   *
@@ -3142,7 +3121,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
   * or lower is eligible for reclaim until at least one usable zone is
   * balanced.
   */
- static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+ static int kbalance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
  {
      int i;
      unsigned long nr_soft_reclaimed;
@@ -3481,8 +3460,6 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
      struct task_struct *tsk = current;
      const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
      
-     kshrinkd_count++;
-     printk("kshrinkd_count is %d",kshrinkd_count);
  
      if (!cpumask_empty(cpumask))
          set_cpus_allowed_ptr(tsk, cpumask);
@@ -3504,8 +3481,9 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
  
      WRITE_ONCE(pgdat->kshrinkd_order, 0);
      WRITE_ONCE(pgdat->kshrinkd_highest_zoneidx, MAX_NR_ZONES);
-     for ( ; ; ) {
-         bool ret;
+
+
+    while (!kthread_should_stop()) {
  
          alloc_order = reclaim_order = READ_ONCE(pgdat->kshrinkd_order);
          highest_zoneidx = kshrinkd_highest_zoneidx(pgdat,
@@ -3527,7 +3505,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
              break;
  
          /*
-          * We can speed up thawing tasks if we don't call balance_pgdat
+          * We can speed up thawing tasks if we don't call kbalance_pgdat
           * after returning from the refrigerator
           */
          if (ret)
@@ -3541,13 +3519,14 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsign
           * but kcompactd is woken to compact for the original
           * request (alloc_order).
           */
-         reclaim_order = balance_pgdat(pgdat, alloc_order,
+        kbalance_pgdat(pgdat, alloc_order,
                          highest_zoneidx);
-         if (reclaim_order < alloc_order)
-             goto kshrinkd_try_sleep;
-     }
- 
-     tsk->flags &= ~(PF_MEMALLOC | PF_SWAPWRITE | PF_kshrinkd);
+        if (atomic_read(&victim_page_count) < VICTIM_LIST_MAX_PAGES) {
+                goto kshrinkd_try_sleep;
+        }
+    
+        cond_resched();
+    }
  
      return 0;
  }
